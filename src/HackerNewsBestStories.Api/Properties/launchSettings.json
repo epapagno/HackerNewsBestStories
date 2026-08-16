@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "HackerNewsBestStories.Api": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "https://localhost:39716;http://localhost:39717"
+    }
+  }
+}
