@@ -26,10 +26,10 @@ public sealed class StoriesController : ControllerBase
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<ActionResult<IReadOnlyList<StoryResponse>>> GetBestStories(
-        [FromQuery] int n,
+        [FromQuery] int qtyStories,
         CancellationToken cancellationToken)
     {
-        if (n < 1 || n > _options.MaxRequestedStories)
+        if (qtyStories < 1 || qtyStories > _options.MaxRequestedStories)
         {
             return BadRequest(new
             {
@@ -39,7 +39,7 @@ public sealed class StoriesController : ControllerBase
 
         try
         {
-            var stories = await _bestStoriesService.GetBestStoriesAsync(n, cancellationToken);
+            var stories = await _bestStoriesService.GetBestStoriesAsync(qtyStories, cancellationToken);
             return Ok(stories);
         }
         catch (HttpRequestException)
