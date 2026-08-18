@@ -15,13 +15,27 @@ dotnet restore
 dotnet run --project src/HackerNewsBestStories.Api
 ```
 
-Use the URL printed by ASP.NET Core and call:
+The exact port can vary depending on the local ASP.NET Core configuration. Use the URL printed in the console when the application starts.
+
+You can call the API directly:
 
 ```bash
 curl "http://localhost:5000/api/stories/best?n=10"
 ```
 
-The exact port can vary depending on the local ASP.NET Core configuration.
+## Swagger
+
+Swagger UI is available when running the application in the Development environment.
+
+After starting the API, open:
+
+```text
+http://localhost:<port>/swagger
+```
+
+From Swagger UI, expand `GET /api/stories/best`, click **Try it out**, provide a value for `n` (for example `10`), and execute the request.
+
+Swagger is included to make the API contract easy to inspect and to provide a simple way to test the endpoint without needing an external HTTP client.
 
 ## Test
 
