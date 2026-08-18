@@ -33,7 +33,7 @@ public sealed class StoriesController : ControllerBase
         {
             return BadRequest(new
             {
-                error = $"n must be between 1 and {_options.MaxRequestedStories}."
+                error = $"qtyStories must be between 1 and {_options.MaxRequestedStories}."
             });
         }
 
