@@ -20,7 +20,7 @@ The exact port can vary depending on the local ASP.NET Core configuration. Use t
 You can call the API directly:
 
 ```bash
-curl "http://localhost:5000/api/stories/best?n=10"
+curl "http://localhost:5000/api/stories/best?qtyStories=10"
 ```
 
 ## Swagger
@@ -45,7 +45,7 @@ dotnet test
 
 ## Endpoint
 
-`GET /api/stories/best?n={count}`
+`GET /api/stories/best?qtyStories={count}`
 
 Example response:
 
@@ -74,7 +74,7 @@ The Hacker News `beststories` endpoint returns story IDs. I do not assume those 
 4. Caches that ranked list in memory.
 5. Returns the first `n` entries from the cached list.
 
-The same ranked cache is shared for every value of `n`, so a request for `n=10` followed by `n=20` does not trigger another Hacker News refresh while the cache is valid.
+The same ranked cache is shared for every value of `n`, so a request for `qtyStories=10` followed by `qtyStories=20` does not trigger another Hacker News refresh while the cache is valid.
 
 ## Protecting the Hacker News API
 
