@@ -78,15 +78,59 @@ The same ranked cache is shared for every value of `n`, so a request for `qtySto
 
 ## Protecting the Hacker News API
 
-Two simple measures keep request volume bounded:
+The cache uses **stale-while-revalidate**: callers can continue reading the last
+successful ranked snapshot while a single refresh runs in the background. The
+response format and score ordering remain unchanged.
 
-- The ranked result is cached in memory for 60 seconds by default.
-- A `SemaphoreSlim` allows only one cache refresh at a time, preventing a cache stampede when many callers arrive after expiration.
-- Story-detail calls during a refresh use bounded parallelism (`20` by default) instead of firing every request at once.
+| Snapshot state | Request behavior |
+| --- | --- |
+| Fresh (under 60 seconds by default) | Return immediately without contacting Hacker News. |
+| Stale but usable (60 to under 360 seconds) | Return immediately and start or join one background refresh. |
+| Missing or too old (360 seconds or older) | Wait for the shared refresh; return HTTP 503 if it fails or is in cooldown. |
+| Refresh failed | Keep the last successful snapshot and wait 15 seconds before allowing another attempt. Serve it only while it remains usable. |
 
-These values are configurable in `appsettings.json`.
+The stale allowance is **additional** to the fresh duration. Freshness starts
+when a refresh completes successfully, not when a caller reads the data. A failed
+refresh never extends that timestamp. Refreshes are triggered by demand; there
+is no periodic poller making requests when there is no traffic.
 
-This is intentionally kept in-process and dependency-light for the exercise. For a single application instance it means a large number of callers are normally served without additional Hacker News requests during the cache window.
+The refresh belongs to the application lifetime. A caller disconnecting cancels
+only its own wait; it cannot abort the work shared by other callers. Application
+shutdown cancels upstream work. Background failures are observed and logged.
+
+Configuration is in `appsettings.json` (or standard ASP.NET Core environment overrides):
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `HackerNews:CacheSeconds` | 60 | Fresh snapshot lifetime. Must be positive. |
+| `HackerNews:MaxStaleSeconds` | 300 | Additional stale allowance. Set to 0 to require fresh data. |
+| `HackerNews:RefreshRetrySeconds` | 15 | Minimum pause after a failed refresh. Must be positive. |
+| `HackerNews:MaxConcurrency` | 20 | Maximum simultaneous detail requests within one refresh. |
+| `HackerNews:TimeoutSeconds` | 10 | Timeout of each upstream HTTP request. |
+
+For a refresh with `m` story IDs, the application makes one IDs request plus at
+most `m` detail requests, regardless of how many callers share that refresh.
+It does not automatically retry failed HTTP requests. Detail failures are skipped
+as before; if all details fail for a nonempty IDs list, the refresh fails and
+preserves the previous snapshot. A partially successful refresh can publish a
+smaller result set.
+
+The single-refresh guarantee, concurrency bound and cooldown apply **per process**.
+Multiple replicas each maintain their own cache and request budget; a distributed
+cache with coordinated refresh ownership would be needed to share these limits.
+Bounded concurrency is not a strict upstream requests-per-second limit.
+
+### Verifying behavior under concurrency and failure
+
+Run `dotnet test`. The suite includes 500 concurrent cold-cache callers sharing
+one refresh, 500 stale-cache callers completing while a simulated upstream is
+blocked, and 500 callers during an outage without repeated refresh attempts.
+Other checks cover hard expiry, recovery after cooldown, cancellation isolation,
+application shutdown and the configured detail concurrency bound.
+
+Tests use a controlled upstream and a manually advanced clock, so no load is sent
+to the public Hacker News API. These verify concurrency contracts; they are not
+production throughput or latency benchmarks.
 
 ## Assumptions
 
@@ -99,8 +143,8 @@ This is intentionally kept in-process and dependency-light for the exercise. For
 ## What I would improve with more time
 
 - Add integration tests around the HTTP endpoint and error responses.
-- Add retry/backoff and a circuit breaker for transient Hacker News failures, after defining the desired failure behaviour rather than adding retries blindly.
+- Add an explicit upstream requests-per-second budget if a provider quota requires it; the existing concurrency limit and failed-refresh cooldown serve different purposes.
 - Use a distributed cache such as Redis if the API needed to run on multiple instances, so every instance does not refresh Hacker News independently.
-- Consider stale-while-revalidate/background refresh so callers never pay the refresh latency after cache expiry.
-- Add metrics around cache hits, refresh duration, upstream failures and request counts before tuning cache duration or concurrency.
+- Expose cache age and refresh metrics so freshness and upstream protection can be monitored in production.
+- Measure throughput and latency with an HTTP load test against a simulated upstream before tuning cache duration or concurrency.
 - Add container/deployment configuration if the target environment required it.

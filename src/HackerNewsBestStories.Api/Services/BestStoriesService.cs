@@ -1,31 +1,37 @@
 using System.Collections.Concurrent;
 using HackerNewsBestStories.Api.Models;
 using HackerNewsBestStories.Api.Options;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 
 namespace HackerNewsBestStories.Api.Services;
 
 public sealed class BestStoriesService : IBestStoriesService
 {
-    private const string CacheKey = "best-stories-ranked";
-
     private readonly IHackerNewsClient _hackerNewsClient;
-    private readonly IMemoryCache _cache;
     private readonly HackerNewsOptions _options;
     private readonly ILogger<BestStoriesService> _logger;
-    private readonly SemaphoreSlim _refreshLock = new(1, 1);
+    private readonly TimeProvider _timeProvider;
+    private readonly CancellationToken _stoppingToken;
+    private readonly object _gate = new();
+    private Snapshot? _snapshot;
+    private Task<RefreshResult>? _refreshTask;
+    private DateTimeOffset _nextRefreshAttempt;
+
+    private sealed record Snapshot(IReadOnlyList<StoryResponse> Stories, DateTimeOffset RefreshedAt);
+    private sealed record RefreshResult(Snapshot? Snapshot, Exception? Error);
 
     public BestStoriesService(
         IHackerNewsClient hackerNewsClient,
-        IMemoryCache cache,
         IOptions<HackerNewsOptions> options,
-        ILogger<BestStoriesService> logger)
+        ILogger<BestStoriesService> logger,
+        TimeProvider timeProvider,
+        IHostApplicationLifetime applicationLifetime)
     {
         _hackerNewsClient = hackerNewsClient;
-        _cache = cache;
         _options = options.Value;
         _logger = logger;
+        _timeProvider = timeProvider;
+        _stoppingToken = applicationLifetime.ApplicationStopping;
     }
 
     public async Task<IReadOnlyList<StoryResponse>> GetBestStoriesAsync(
@@ -44,22 +50,54 @@ public sealed class BestStoriesService : IBestStoriesService
     private async Task<IReadOnlyList<StoryResponse>> GetRankedStoriesAsync(
         CancellationToken cancellationToken)
     {
-        if (_cache.TryGetValue(CacheKey, out IReadOnlyList<StoryResponse>? cachedStories) &&
-            cachedStories is not null)
-        {
-            return cachedStories;
-        }
+        cancellationToken.ThrowIfCancellationRequested();
+        Task<RefreshResult> refresh;
 
-        await _refreshLock.WaitAsync(cancellationToken);
-
-        try
+        lock (_gate)
         {
-            // Another request may have populated the cache while this one was waiting.
-            if (_cache.TryGetValue(CacheKey, out cachedStories) && cachedStories is not null)
+            var now = _timeProvider.GetUtcNow();
+            var freshFor = TimeSpan.FromSeconds(_options.CacheSeconds);
+            var usableFor = freshFor + TimeSpan.FromSeconds(_options.MaxStaleSeconds);
+            var age = _snapshot is null ? TimeSpan.MaxValue : now - _snapshot.RefreshedAt;
+
+            if (_snapshot is not null && age < freshFor)
             {
-                return cachedStories;
+                return _snapshot.Stories;
             }
 
+            if ((_refreshTask is null || _refreshTask.IsCompleted) && now >= _nextRefreshAttempt)
+            {
+                // The host owns this work. A caller disconnecting only cancels its own wait.
+                _refreshTask = Task.Run(() => RefreshAsync(_stoppingToken), CancellationToken.None);
+            }
+
+            if (_snapshot is not null && age < usableFor)
+            {
+                return _snapshot.Stories;
+            }
+
+            if (_refreshTask is null || _refreshTask.IsCompleted && now < _nextRefreshAttempt)
+            {
+                throw new HttpRequestException("Hacker News refresh is temporarily unavailable; retry later.");
+            }
+
+            refresh = _refreshTask;
+        }
+
+        // Cold or too-old caches wait for the same refresh, without cancelling it for others.
+        var result = await refresh.WaitAsync(cancellationToken);
+        if (result.Snapshot is null)
+        {
+            throw new HttpRequestException("Unable to refresh Hacker News stories.", result.Error);
+        }
+
+        return result.Snapshot.Stories;
+    }
+
+    private async Task<RefreshResult> RefreshAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
             var ids = await _hackerNewsClient.GetBestStoryIdsAsync(cancellationToken);
             var stories = new ConcurrentBag<StoryResponse>();
 
@@ -114,16 +152,32 @@ public sealed class BestStoriesService : IBestStoriesService
                 throw new HttpRequestException("No Hacker News story details could be retrieved.");
             }
 
-            _cache.Set(
-                CacheKey,
-                rankedStories,
-                TimeSpan.FromSeconds(_options.CacheSeconds));
+            var snapshot = new Snapshot(rankedStories, _timeProvider.GetUtcNow());
+            lock (_gate)
+            {
+                _snapshot = snapshot;
+                _nextRefreshAttempt = default;
+            }
 
-            return rankedStories;
+            return new RefreshResult(snapshot, null);
         }
-        finally
+        catch (Exception exception)
         {
-            _refreshLock.Release();
+            // Observe background failures and back off even when no usable snapshot exists.
+            lock (_gate)
+            {
+                _nextRefreshAttempt = _timeProvider.GetUtcNow()
+                    + TimeSpan.FromSeconds(_options.RefreshRetrySeconds);
+            }
+
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogWarning(exception,
+                    "Hacker News refresh failed; next attempt in {RetrySeconds} seconds",
+                    _options.RefreshRetrySeconds);
+            }
+
+            return new RefreshResult(null, exception);
         }
     }
 }

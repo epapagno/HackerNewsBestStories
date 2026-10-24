@@ -5,13 +5,20 @@ using Microsoft.Extensions.Options;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
-builder.Services.AddMemoryCache();
+builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 builder.Services
     .AddOptions<HackerNewsOptions>()
-    .Bind(builder.Configuration.GetSection(HackerNewsOptions.SectionName));
+    .Bind(builder.Configuration.GetSection(HackerNewsOptions.SectionName))
+    .Validate(options => options.CacheSeconds > 0, "CacheSeconds must be positive.")
+    .Validate(options => options.MaxStaleSeconds >= 0, "MaxStaleSeconds must not be negative.")
+    .Validate(options => options.RefreshRetrySeconds > 0, "RefreshRetrySeconds must be positive.")
+    .Validate(options => options.MaxConcurrency > 0, "MaxConcurrency must be positive.")
+    .Validate(options => options.TimeoutSeconds > 0, "TimeoutSeconds must be positive.")
+    .Validate(options => options.MaxRequestedStories > 0, "MaxRequestedStories must be positive.")
+    .ValidateOnStart();
 
 builder.Services.AddHttpClient(HackerNewsClient.ClientName, (serviceProvider, client) =>
 {
