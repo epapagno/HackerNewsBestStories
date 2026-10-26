@@ -145,6 +145,7 @@ production throughput or latency benchmarks.
 - Add integration tests around the HTTP endpoint and error responses.
 - Add an explicit upstream requests-per-second budget if a provider quota requires it; the existing concurrency limit and failed-refresh cooldown serve different purposes.
 - Use a distributed cache such as Redis if the API needed to run on multiple instances, so every instance does not refresh Hacker News independently.
+- Coordinate those refreshes across instances with a message bus (MassTransit over RabbitMQ) if the system grew event-driven: a single worker would own the refresh and publish a `BestStoriesRefreshed` event that each instance consumes to update its local cache, extending the per-process single-refresh guarantee to the whole cluster instead of every replica polling Hacker News on its own. This stays off the synchronous read path, which remains a direct in-process call so request latency is not coupled to a broker.
 - Expose cache age and refresh metrics so freshness and upstream protection can be monitored in production.
 - Measure throughput and latency with an HTTP load test against a simulated upstream before tuning cache duration or concurrency.
 - Add container/deployment configuration if the target environment required it.
