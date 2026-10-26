@@ -33,7 +33,7 @@ After starting the API, open:
 http://localhost:<port>/swagger
 ```
 
-From Swagger UI, expand `GET /api/stories/best`, click **Try it out**, provide a value for `n` (for example `10`), and execute the request.
+From Swagger UI, expand `GET /api/stories/best`, click **Try it out**, provide a value for `qtyStories` (for example `10`), and execute the request.
 
 Swagger is included to make the API contract easy to inspect and to provide a simple way to test the endpoint without needing an external HTTP client.
 
@@ -62,7 +62,7 @@ Example response:
 ]
 ```
 
-`n` must be between 1 and 500. If Hacker News exposes fewer than `n` best stories at that moment, the API returns the stories that are available.
+`qtyStories` must be between 1 and 500. If Hacker News exposes fewer than `qtyStories` best stories at that moment, the API returns the stories that are available.
 
 ## Approach
 
