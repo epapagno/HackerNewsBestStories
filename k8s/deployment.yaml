@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: epapagno-hackernews-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: epapagno-hackernews-api
+  template:
+    metadata:
+      labels:
+        app: epapagno-hackernews-api
+    spec:
+      containers:
+        - name: epapagno-hackernews-api
+          image: epapagno-hackernews-api:1.0
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
