@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: epapagno-hackernews-api
-        image: epapagno-hackernews-api:1.1
+        image: epapagno-hackernews-api:1.2
         imagePullPolicy: Never
         ports:
           - containerPort: 8080
@@ -24,5 +24,13 @@ spec:
             port: 8080
           initialDelaySeconds: 10
           periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
           timeoutSeconds: 3
           failureThreshold: 3
