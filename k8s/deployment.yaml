@@ -13,8 +13,16 @@ spec:
         app: epapagno-hackernews-api
     spec:
       containers:
-        - name: epapagno-hackernews-api
-          image: epapagno-hackernews-api:1.0
-          imagePullPolicy: Never
-          ports:
-            - containerPort: 8080
+      - name: epapagno-hackernews-api
+        image: epapagno-hackernews-api:1.1
+        imagePullPolicy: Never
+        ports:
+          - containerPort: 8080
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
