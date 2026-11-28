@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: epapagno-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: epapagno-redis
+  template:
+    metadata:
+      labels:
+        app: epapagno-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:8
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: epapagno-redis
+spec:
+  selector:
+    app: epapagno-redis
+  ports:
+    - port: 6379

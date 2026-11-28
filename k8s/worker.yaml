@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: epapagno-persistence-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: epapagno-persistence-worker
+  template:
+    metadata:
+      labels:
+        app: epapagno-persistence-worker
+    spec:
+      containers:
+        - name: worker
+          image: epapagno-persistence-worker:2.0
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+                name: epapagno-application-config
+            - secretRef:
+                name: epapagno-application-secret
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi

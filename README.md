@@ -149,3 +149,210 @@ production throughput or latency benchmarks.
 - Expose cache age and refresh metrics so freshness and upstream protection can be monitored in production.
 - Measure throughput and latency with an HTTP load test against a simulated upstream before tuning cache duration or concurrency.
 - Add container/deployment configuration if the target environment required it.
+
+
+## Distributed architecture
+
+The diagrams below describe the distributed implementation. The in-process cache remains a fallback when Redis is unavailable.
+
+### Component overview
+
+```mermaid
+flowchart LR
+    C[HTTP consumer] --> A[ASP.NET Core API replicas]
+    A -->|Read snapshot and coordinate refresh| R[(Redis)]
+    A -->|Fetch ranking on demand| H[Hacker News API]
+    A -->|Read persisted snapshot| P[(PostgreSQL)]
+    A -->|Publish refreshed snapshot| B[Service Bus emulator]
+    B -->|Deliver message| W[Persistence Worker]
+    W -->|Transactional write| P
+    B -->|Internal dependency| S[(SQL Server)]
+```
+
+### Data source selection
+
+```mermaid
+flowchart TD
+    A[Incoming request] --> B{Redis reachable?}
+    B -->|Yes| C{Redis contains ranking?}
+    C -->|Yes| D{Age under 6 hours?}
+    D -->|Yes| E[Return Cache - fresh]
+    D -->|No| F[Return Cache - stale]
+    F -.-> G[Schedule coordinated refresh]
+    C -->|No| H{PostgreSQL contains ranking?}
+    H -->|Yes| I[Return Local - fresh or stale]
+    I -.-> J[Restore Redis and refresh if stale]
+    H -->|No| K[Wait for distributed refresh]
+    K --> L{Refresh outcome?}
+    L -->|Own successful fetch| M[Return External]
+    L -->|Another replica publishes| N[Return Cache]
+    L -->|No snapshot available| O[HTTP 503]
+    B -->|No| P{PostgreSQL contains ranking?}
+    P -->|Yes| Q[Return Local - fresh or stale]
+    P -->|No| R[Use in-process fallback]
+    R --> S{Usable local cache or successful fetch?}
+    S -->|Cached ranking| T[Return Cache]
+    S -->|Successful upstream fetch| M
+    S -->|Neither| O
+```
+
+| Response origin | Selection condition | Background behavior |
+| --- | --- | --- |
+| Cache (Redis) | Shared snapshot exists, regardless of age | Refresh on demand if at least six hours old, subject to lease and cooldown |
+| Local (PostgreSQL) | Redis misses or is unavailable and PostgreSQL has a snapshot | Restore Redis when reachable; refresh if stale |
+| External (Hacker News) | No usable snapshot and the request's refresh successfully fetches the ranking | Attempt to update Redis and publish for persistence when using the distributed path |
+| Cache (in-process fallback) | Redis unavailable, PostgreSQL has no snapshot, and the process has a usable local snapshot | Legacy per-process refresh policy |
+| HTTP 503 | No usable snapshot and refresh fails or no shared snapshot becomes available | Retry subject to the applicable cooldown |
+
+A stale response keeps its original fetched timestamp. Background refresh does not change the origin of the response already returned. A fresh PostgreSQL snapshot can hydrate Redis without contacting Hacker News. When Redis is unreachable, the current implementation returns a PostgreSQL snapshot without scheduling a refresh.
+
+### Request and cache refresh
+
+```mermaid
+flowchart TD
+    A[GET best stories] --> B{Redis available?}
+    B -->|No| C{PostgreSQL snapshot?}
+    C -->|Yes| D[Return persisted ranking]
+    C -->|No| E[In-process fallback]
+    B -->|Yes| F{Redis snapshot?}
+    F -->|Yes| G{Fresh under 6 hours?}
+    G -->|Yes| H[Return requested stories]
+    G -->|No| I[Return stale ranking and schedule refresh]
+    F -->|No| J{PostgreSQL snapshot?}
+    J -->|Yes| K[Return persisted ranking and schedule cache recovery]
+    J -->|No| L[Wait for shared refresh]
+    I -.-> M{Cooldown active?}
+    K -.-> M
+    L --> M
+    M -->|Yes| N[Skip upstream refresh]
+    M -->|No| O{Acquire Redis lease?}
+    O -->|No| Q[Another replica owns refresh]
+    O -->|Yes| T[Recheck shared data and restore from PostgreSQL if needed]
+    T --> U{Fresh snapshot available?}
+    U -->|Yes| V[Reuse snapshot]
+    U -->|No| X[Fetch Hacker News ranking]
+    X --> Y{Refresh successful?}
+    Y -->|Yes| Z[Replace Redis snapshot and attempt publication]
+    Y -->|No| AA[Preserve previous data and set retry cooldown]
+```
+
+The distributed refresh cooldown is three hours when data exists and 15 seconds otherwise. Cold callers may receive HTTP 503 if no snapshot becomes available. Freshness is logical: Redis does not delete the ranking after six hours.
+
+### Asynchronous persistence
+
+```mermaid
+sequenceDiagram
+    participant A as API
+    participant R as Redis
+    participant B as Service Bus
+    participant W as Worker
+    participant P as PostgreSQL
+    A->>R: Publish snapshot under owned lease
+    R-->>A: Accepted
+    A->>B: Send complete ranking
+    B-->>W: Deliver snapshot
+    W->>P: Begin transaction and acquire advisory lock
+    W->>P: Compare fetched_at
+    alt Newer snapshot
+        W->>P: Upsert stories and metadata
+        W->>P: Delete stories outside ranking
+    else Older or duplicate snapshot
+        Note over W,P: Keep existing ranking
+    end
+    W->>P: Commit transaction
+    W->>B: Complete message
+```
+
+If broker publication fails, the API logs the error and can still serve the Redis snapshot. Automatic replay of failed publications is not implemented.
+
+### Kubernetes topology
+
+```mermaid
+flowchart TD
+    C[Consumer] --> I[Ingress controller]
+    subgraph NS[Namespace epapagno-hackernews]
+        I --> AS[API ClusterIP Service]
+        AS --> A1[API Pod 1]
+        AS --> A2[API Pod 2]
+        A1 & A2 --> RS[Redis Service]
+        RS --> R[Redis Pod]
+        A1 & A2 --> BS[Service Bus Service]
+        BS --> B[Emulator Pod]
+        B --> SS[SQL Server Service]
+        SS --> S[SQL Server Pod]
+        A1 & A2 --> PS[PostgreSQL headless Service]
+        W[Worker Pod] --> BS
+        W --> PS
+        PS --> P[PostgreSQL StatefulSet Pod]
+        P --> PVC[PersistentVolumeClaim]
+        CFG[Application ConfigMap and Secret] -.-> A1 & A2 & W
+    end
+    PVC --> PV[(PersistentVolume)]
+```
+
+The ingress controller and storage provisioner are cluster infrastructure; they are not installed by these application manifests.
+
+## Distributed deployment (local development)
+
+The API serves the ranking from Cache, Local persistence or External provider.
+Successful refreshes publish the full ranking to Service Bus; the worker commits
+the relational stories and ranking_metadata tables before acknowledging messages.
+
+### Docker Compose
+
+Copy .env.example to .env, supply PostgreSQL credentials and a strong SQL Server
+password, and accept the emulator and SQL Server license terms before setting
+ACCEPT_EULA=Y. Run:
+
+```powershell
+docker compose config --quiet
+docker compose up --build -d
+docker compose ps
+curl.exe -i "http://localhost:8081/api/stories/best?qtyStories=10"
+```
+
+### Kubernetes (Docker Desktop kind)
+
+Use a dedicated namespace, epapagno-hackernews. Create the namespace first:
+
+```powershell
+kubectl apply -f k8s/namespace.yaml
+```
+
+Create the following Secrets in that namespace using your own credentials.
+Do not commit real secrets.
+
+| Secret | Required keys |
+| --- | --- |
+| epapagno-postgres-secret | POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB |
+| epapagno-application-secret | ConnectionStrings__Postgres |
+| epapagno-emulator-secret | ACCEPT_EULA, MSSQL_SA_PASSWORD |
+
+The PostgreSQL connection string must use Host=epapagno-postgres and match
+the PostgreSQL Secret. ACCEPT_EULA must be Y only after accepting the terms.
+
+Build and import both local images:
+
+```powershell
+docker build -t epapagno-hackernews-api:2.0 -f dockerfile .
+docker build -t epapagno-persistence-worker:2.0 -f worker.dockerfile .
+docker save -o hackernews-2.0.tar epapagno-hackernews-api:2.0 epapagno-persistence-worker:2.0
+docker cp hackernews-2.0.tar desktop-control-plane:/root/hackernews-2.0.tar
+docker exec desktop-control-plane ctr -n k8s.io images import /root/hackernews-2.0.tar
+kubectl apply -n epapagno-hackernews -f k8s/
+kubectl get pods,svc,pvc -n epapagno-hackernews
+```
+
+### Validation checklist
+
+- Build and run unit tests before deploying.
+- First request on empty stores: External; subsequent requests: Cache.
+- Verify worker logs and relational rows in PostgreSQL.
+- Delete only the Redis snapshot in a test environment and verify Local recovery.
+- Verify old or duplicate messages cannot replace a newer ranking.
+- Verify stale responses preserve the original retrieval timestamp.
+- Verify the API returns 503 when no usable data exists and the provider fails.
+- Verify the three X-Data-* headers in Swagger.
+
+The emulator is for local development only. DLQ replay and recovery of failed
+broker publications are deferred. Do not assume emulator messages survive restarts.

@@ -39,8 +39,11 @@ public sealed class StoriesController : ControllerBase
 
         try
         {
-            var stories = await _bestStoriesService.GetBestStoriesAsync(qtyStories, cancellationToken);
-            return Ok(stories);
+            var result = await _bestStoriesService.GetBestStoriesResultAsync(qtyStories, cancellationToken);
+            Response.Headers["X-Data-Origin"] = result.Origin.ToString();
+            Response.Headers["X-Data-Fetched-At"] = result.FetchedAt.UtcDateTime.ToString("O");
+            Response.Headers["X-Data-Is-Stale"] = result.IsStale ? "true" : "false";
+            return Ok(result.Stories);
         }
         catch (HttpRequestException)
         {

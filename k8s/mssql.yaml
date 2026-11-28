@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: epapagno-mssql
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: epapagno-mssql
+  template:
+    metadata:
+      labels:
+        app: epapagno-mssql
+    spec:
+      containers:
+        - name: mssql
+          image: mcr.microsoft.com/mssql/server:2022-latest
+          envFrom:
+            - secretRef:
+                name: epapagno-emulator-secret
+          env:
+            - name: MSSQL_PID
+              value: Developer
+            - name: MSSQL_MEMORY_LIMIT_MB
+              value: "2048"
+          ports:
+            - containerPort: 1433
+          readinessProbe:
+            tcpSocket:
+              port: 1433
+            initialDelaySeconds: 15
+          resources:
+            requests:
+              cpu: 250m
+              memory: 2Gi
+            limits:
+              memory: 3Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: epapagno-mssql
+spec:
+  selector:
+    app: epapagno-mssql
+  ports:
+    - port: 1433
