@@ -12,6 +12,7 @@ public sealed class BestStoriesService : IBestStoriesService
     private readonly ILogger<BestStoriesService> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly CancellationToken _stoppingToken;
+    private readonly RedisSnapshotStore? _redis;
     private readonly object _gate = new();
     private Snapshot? _snapshot;
     private Task<RefreshResult>? _refreshTask;
@@ -25,13 +26,15 @@ public sealed class BestStoriesService : IBestStoriesService
         IOptions<HackerNewsOptions> options,
         ILogger<BestStoriesService> logger,
         TimeProvider timeProvider,
-        IHostApplicationLifetime applicationLifetime)
+        IHostApplicationLifetime applicationLifetime,
+        RedisSnapshotStore? redis = null)
     {
         _hackerNewsClient = hackerNewsClient;
         _options = options.Value;
         _logger = logger;
         _timeProvider = timeProvider;
         _stoppingToken = applicationLifetime.ApplicationStopping;
+        _redis = redis;
     }
 
     public async Task<IReadOnlyList<StoryResponse>> GetBestStoriesAsync(
@@ -43,7 +46,9 @@ public sealed class BestStoriesService : IBestStoriesService
             throw new ArgumentOutOfRangeException(nameof(count));
         }
 
-        var rankedStories = await GetRankedStoriesAsync(cancellationToken);
+        var rankedStories = _redis is null
+            ? await GetRankedStoriesAsync(cancellationToken)
+            : await GetDistributedStoriesAsync(cancellationToken);
         return rankedStories.Take(count).ToArray();
     }
 
@@ -94,12 +99,92 @@ public sealed class BestStoriesService : IBestStoriesService
         return result.Snapshot.Stories;
     }
 
+    private async Task<IReadOnlyList<StoryResponse>> GetDistributedStoriesAsync(CancellationToken cancellationToken)
+    {
+        var redis = _redis!;
+        var snapshot = await redis.ReadAsync();
+        if (snapshot is not null)
+        {
+            if (_timeProvider.GetUtcNow() - snapshot.FetchedAt >= TimeSpan.FromSeconds(_options.CacheSeconds))
+            {
+                lock (_gate)
+                {
+                    if (_refreshTask is null || _refreshTask.IsCompleted)
+                        _refreshTask = Task.Run(() => RefreshDistributedAsync(), CancellationToken.None);
+                }
+            }
+            return snapshot.Stories;
+        }
+
+        Task<RefreshResult> refresh;
+        lock (_gate)
+        {
+            if (_refreshTask is null || _refreshTask.IsCompleted)
+                _refreshTask = Task.Run(() => RefreshDistributedAsync(), CancellationToken.None);
+            refresh = _refreshTask;
+        }
+        var result = await refresh.WaitAsync(cancellationToken);
+        if (result.Snapshot is not null) return result.Snapshot.Stories;
+
+        // Another replica may own the cold-cache refresh.
+        for (var i = 0; i < 120; i++)
+        {
+            var shared = await redis.ReadAsync();
+            if (shared is not null) return shared.Stories;
+            if (await redis.IsRetryDelayedAsync()) break;
+            await Task.Delay(500, cancellationToken);
+        }
+        throw new HttpRequestException("No shared Hacker News snapshot is available.", result.Error);
+    }
+
+    private async Task<RefreshResult> RefreshDistributedAsync()
+    {
+        var redis = _redis!;
+        var token = Guid.NewGuid().ToString("N");
+        var acquired = false;
+        try
+        {
+            if (await redis.IsRetryDelayedAsync()) return new RefreshResult(null, null);
+            acquired = await redis.TryAcquireAsync(token, TimeSpan.FromSeconds(_options.RefreshLeaseSeconds));
+            if (!acquired) return new RefreshResult(null, null);
+            var existing = await redis.ReadAsync();
+            if (existing is not null && _timeProvider.GetUtcNow() - existing.FetchedAt < TimeSpan.FromSeconds(_options.CacheSeconds))
+                return new RefreshResult(new Snapshot(existing.Stories, existing.FetchedAt), null);
+            if (await redis.IsRetryDelayedAsync()) return new RefreshResult(null, null);
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_stoppingToken);
+            deadline.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, _options.RefreshLeaseSeconds - 5)));
+            var result = await RefreshAsync(deadline.Token);
+            if (result.Snapshot is null)
+            {
+                await redis.DelayRetryAsync(token, TimeSpan.FromSeconds(existing is null
+                    ? _options.RefreshRetrySeconds : _options.RefreshRetryWithDataSeconds));
+                return result;
+            }
+            var published = await redis.PublishAsync(token, new StorySnapshot(result.Snapshot.RefreshedAt, result.Snapshot.Stories));
+            return published ? result : new RefreshResult(null, null);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Distributed refresh failed");
+            return new RefreshResult(null, exception);
+        }
+        finally
+        {
+            if (acquired)
+            {
+                try { await redis.ReleaseAsync(token); }
+                catch (Exception exception) { _logger.LogWarning(exception, "Unable to release refresh lease"); }
+            }
+        }
+    }
+
     private async Task<RefreshResult> RefreshAsync(CancellationToken cancellationToken)
     {
         try
         {
             var ids = await _hackerNewsClient.GetBestStoryIdsAsync(cancellationToken);
             var stories = new ConcurrentBag<StoryResponse>();
+            var failures = 0;
 
             await Parallel.ForEachAsync(
                 ids,
@@ -114,6 +199,7 @@ public sealed class BestStoriesService : IBestStoriesService
                     {
                         var item = await _hackerNewsClient.GetStoryAsync(id, token);
 
+                        if (item is null) Interlocked.Increment(ref failures);
                         if (item is null ||
                             item.Deleted is true ||
                             item.Dead is true ||
@@ -134,10 +220,12 @@ public sealed class BestStoriesService : IBestStoriesService
                     }
                     catch (HttpRequestException exception)
                     {
+                        Interlocked.Increment(ref failures);
                         _logger.LogWarning(exception, "Failed to retrieve Hacker News story {StoryId}", id);
                     }
                     catch (TaskCanceledException exception) when (!token.IsCancellationRequested)
                     {
+                        Interlocked.Increment(ref failures);
                         _logger.LogWarning(exception, "Timed out retrieving Hacker News story {StoryId}", id);
                     }
                 });
@@ -145,9 +233,10 @@ public sealed class BestStoriesService : IBestStoriesService
             var rankedStories = stories
                 .OrderByDescending(story => story.Score)
                 .ThenByDescending(story => story.Time)
+                .Take(_options.MaxRequestedStories)
                 .ToArray();
 
-            if (ids.Count > 0 && rankedStories.Length == 0)
+            if ((_redis is not null && failures > 0) || (ids.Count > 0 && rankedStories.Length == 0))
             {
                 throw new HttpRequestException("No Hacker News story details could be retrieved.");
             }
