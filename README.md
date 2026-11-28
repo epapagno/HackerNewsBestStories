@@ -149,3 +149,69 @@ production throughput or latency benchmarks.
 - Expose cache age and refresh metrics so freshness and upstream protection can be monitored in production.
 - Measure throughput and latency with an HTTP load test against a simulated upstream before tuning cache duration or concurrency.
 - Add container/deployment configuration if the target environment required it.
+
+
+## Distributed deployment (local development)
+
+The API serves the ranking from Cache, Local persistence or External provider.
+Successful refreshes publish the full ranking to Service Bus; the worker commits
+the relational stories and ranking_metadata tables before acknowledging messages.
+
+### Docker Compose
+
+Copy .env.example to .env, supply PostgreSQL credentials and a strong SQL Server
+password, and accept the emulator and SQL Server license terms before setting
+ACCEPT_EULA=Y. Run:
+
+```powershell
+docker compose config --quiet
+docker compose up --build -d
+docker compose ps
+curl.exe -i "http://localhost:8081/api/stories/best?qtyStories=10"
+```
+
+### Kubernetes (Docker Desktop kind)
+
+Use a dedicated namespace, epapagno-hackernews. Create the namespace first:
+
+```powershell
+kubectl apply -f k8s/namespace.yaml
+```
+
+Create the following Secrets in that namespace using your own credentials.
+Do not commit real secrets.
+
+| Secret | Required keys |
+| --- | --- |
+| epapagno-postgres-secret | POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB |
+| epapagno-application-secret | ConnectionStrings__Postgres |
+| epapagno-emulator-secret | ACCEPT_EULA, MSSQL_SA_PASSWORD |
+
+The PostgreSQL connection string must use Host=epapagno-postgres and match
+the PostgreSQL Secret. ACCEPT_EULA must be Y only after accepting the terms.
+
+Build and import both local images:
+
+```powershell
+docker build -t epapagno-hackernews-api:2.0 -f dockerfile .
+docker build -t epapagno-persistence-worker:2.0 -f worker.dockerfile .
+docker save -o hackernews-2.0.tar epapagno-hackernews-api:2.0 epapagno-persistence-worker:2.0
+docker cp hackernews-2.0.tar desktop-control-plane:/root/hackernews-2.0.tar
+docker exec desktop-control-plane ctr -n k8s.io images import /root/hackernews-2.0.tar
+kubectl apply -n epapagno-hackernews -f k8s/
+kubectl get pods,svc,pvc -n epapagno-hackernews
+```
+
+### Validation checklist
+
+- Build and run unit tests before deploying.
+- First request on empty stores: External; subsequent requests: Cache.
+- Verify worker logs and relational rows in PostgreSQL.
+- Delete only the Redis snapshot in a test environment and verify Local recovery.
+- Verify old or duplicate messages cannot replace a newer ranking.
+- Verify stale responses preserve the original retrieval timestamp.
+- Verify the API returns 503 when no usable data exists and the provider fails.
+- Verify the three X-Data-* headers in Swagger.
+
+The emulator is for local development only. DLQ replay and recovery of failed
+broker publications are deferred. Do not assume emulator messages survive restarts.
