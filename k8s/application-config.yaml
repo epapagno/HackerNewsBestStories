@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: epapagno-application-config
+data:
+  Redis__ConnectionString: epapagno-redis:6379,abortConnect=false
+  ConnectionStrings__ServiceBus: Endpoint=sb://epapagno-servicebus;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;
