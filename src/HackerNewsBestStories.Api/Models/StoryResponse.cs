@@ -8,8 +8,10 @@ public sealed class StoryResponse
         string postedBy,
         DateTimeOffset time,
         int score,
-        int commentCount)
+        int commentCount,
+        int id = 0)
     {
+        Id = id;
         Title = title;
         Uri = uri;
         PostedBy = postedBy;
@@ -18,6 +20,7 @@ public sealed class StoryResponse
         CommentCount = commentCount;
     }
 
+    public int Id { get; }
     public string Title { get; }
     public string? Uri { get; }
     public string PostedBy { get; }
