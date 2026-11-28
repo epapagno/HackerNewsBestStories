@@ -1,0 +1,88 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: epapagno-servicebus-config
+data:
+  Config.json: |
+    {
+      "UserConfig": {
+        "Namespaces": [
+          {
+            "Name": "sbemulatorns",
+            "Queues": [
+              {
+                "Name": "story-snapshots",
+                "Properties": {
+                  "DeadLetteringOnMessageExpiration": true,
+                  "DefaultMessageTimeToLive": "P7D",
+                  "DuplicateDetectionHistoryTimeWindow": "PT10M",
+                  "LockDuration": "PT1M",
+                  "MaxDeliveryCount": 10,
+                  "RequiresDuplicateDetection": false,
+                  "RequiresSession": false
+                }
+              }
+            ],
+            "Topics": []
+          }
+        ],
+        "Logging": {
+          "Type": "Console"
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: epapagno-servicebus
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: epapagno-servicebus
+  template:
+    metadata:
+      labels:
+        app: epapagno-servicebus
+    spec:
+      containers:
+        - name: emulator
+          image: mcr.microsoft.com/azure-messaging/servicebus-emulator:latest
+          envFrom:
+            - secretRef:
+                name: epapagno-emulator-secret
+          env:
+            - name: SQL_SERVER
+              value: epapagno-mssql
+            - name: SQL_WAIT_INTERVAL
+              value: "30"
+          ports:
+            - containerPort: 5672
+          volumeMounts:
+            - name: config
+              mountPath: /ServiceBus_Emulator/ConfigFiles/Config.json
+              subPath: Config.json
+          readinessProbe:
+            tcpSocket:
+              port: 5672
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: epapagno-servicebus-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: epapagno-servicebus
+spec:
+  selector:
+    app: epapagno-servicebus
+  ports:
+    - port: 5672
