@@ -33,26 +33,66 @@ public sealed class SnapshotWorker(ServiceBusClient bus, NpgsqlDataSource databa
         var stories = root.GetProperty("Stories");
         if (stories.ValueKind != JsonValueKind.Array || stories.GetArrayLength() > 500)
             throw new InvalidDataException("Invalid snapshot size");
+        var ids = new HashSet<long>();
+        foreach (var story in stories.EnumerateArray())
+        {
+            var id = story.GetProperty("Id").GetInt64();
+            if (id <= 0 || !ids.Add(id))
+                throw new InvalidDataException("Invalid or duplicate story identifier");
+        }
+
         await using var connection = await database.OpenConnectionAsync(token);
         await using var transaction = await connection.BeginTransactionAsync(token);
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            CREATE TABLE IF NOT EXISTS best_stories_snapshot (
+            SELECT pg_advisory_xact_lock(73102841);
+            CREATE TABLE IF NOT EXISTS stories (
+                id bigint PRIMARY KEY,
+                title text NOT NULL,
+                url text,
+                score integer NOT NULL,
+                author text NOT NULL,
+                published_at timestamptz NOT NULL,
+                comment_count integer NOT NULL,
+                updated_at timestamptz NOT NULL DEFAULT now()
+            );
+            CREATE TABLE IF NOT EXISTS ranking_metadata (
                 id integer PRIMARY KEY CHECK (id = 1),
                 fetched_at timestamptz NOT NULL,
-                persisted_at timestamptz NOT NULL,
-                stories jsonb NOT NULL
+                persisted_at timestamptz NOT NULL
             );
-            INSERT INTO best_stories_snapshot (id, fetched_at, persisted_at, stories)
-            VALUES (1, @fetched, now(), @stories)
+            """;
+        await command.ExecuteNonQueryAsync(token);
+        command.CommandText = """
+            INSERT INTO ranking_metadata (id, fetched_at, persisted_at)
+            VALUES (1, @fetched, now())
             ON CONFLICT (id) DO UPDATE SET fetched_at = EXCLUDED.fetched_at,
-                persisted_at = EXCLUDED.persisted_at, stories = EXCLUDED.stories
-            WHERE best_stories_snapshot.fetched_at < EXCLUDED.fetched_at;
+                persisted_at = EXCLUDED.persisted_at
+            WHERE ranking_metadata.fetched_at < EXCLUDED.fetched_at
+            RETURNING id;
             """;
         command.Parameters.AddWithValue("fetched", NpgsqlDbType.TimestampTz, fetchedAt);
-        command.Parameters.AddWithValue("stories", NpgsqlDbType.Jsonb, stories.GetRawText());
-        await command.ExecuteNonQueryAsync(token);
+        var accepted = await command.ExecuteScalarAsync(token);
+        if (accepted is not null)
+        {
+            command.Parameters.Clear();
+            command.CommandText = """
+                INSERT INTO stories (id, title, url, score, author, published_at, comment_count, updated_at)
+                SELECT x."Id", x."Title", x."Uri", x."Score", x."PostedBy", x."Time", x."CommentCount", now()
+                FROM jsonb_to_recordset(@payload) AS x(
+                    "Id" bigint, "Title" text, "Uri" text, "Score" integer,
+                    "PostedBy" text, "Time" timestamptz, "CommentCount" integer)
+                ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, url = EXCLUDED.url,
+                    score = EXCLUDED.score, author = EXCLUDED.author,
+                    published_at = EXCLUDED.published_at, comment_count = EXCLUDED.comment_count,
+                    updated_at = EXCLUDED.updated_at;
+                DELETE FROM stories WHERE NOT (id = ANY(@ids));
+                """;
+            command.Parameters.AddWithValue("payload", NpgsqlDbType.Jsonb, stories.GetRawText());
+            command.Parameters.AddWithValue("ids", NpgsqlDbType.Array | NpgsqlDbType.Bigint, ids.ToArray());
+            await command.ExecuteNonQueryAsync(token);
+        }
         await transaction.CommitAsync(token);
         await args.CompleteMessageAsync(args.Message, token);
     }
