@@ -222,7 +222,8 @@ public sealed class BestStoriesService : IBestStoriesService
                             item.By,
                             DateTimeOffset.FromUnixTimeSeconds(item.Time),
                             item.Score,
-                            item.CommentCount));
+                            item.CommentCount,
+                            id));
                     }
                     catch (HttpRequestException exception)
                     {
