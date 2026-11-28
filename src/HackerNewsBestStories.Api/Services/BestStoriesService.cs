@@ -14,6 +14,7 @@ public sealed class BestStoriesService : IBestStoriesService
     private readonly CancellationToken _stoppingToken;
     private readonly RedisSnapshotStore? _redis;
     private readonly SnapshotPublisher? _publisher;
+    private readonly PostgresSnapshotStore? _postgres;
     private readonly object _gate = new();
     private Snapshot? _snapshot;
     private Task<RefreshResult>? _refreshTask;
@@ -29,7 +30,8 @@ public sealed class BestStoriesService : IBestStoriesService
         TimeProvider timeProvider,
         IHostApplicationLifetime applicationLifetime,
         RedisSnapshotStore? redis = null,
-        SnapshotPublisher? publisher = null)
+        SnapshotPublisher? publisher = null,
+        PostgresSnapshotStore? postgres = null)
     {
         _hackerNewsClient = hackerNewsClient;
         _options = options.Value;
@@ -38,6 +40,7 @@ public sealed class BestStoriesService : IBestStoriesService
         _stoppingToken = applicationLifetime.ApplicationStopping;
         _redis = redis;
         _publisher = publisher;
+        _postgres = postgres;
     }
 
     public async Task<IReadOnlyList<StoryResponse>> GetBestStoriesAsync(
@@ -105,7 +108,17 @@ public sealed class BestStoriesService : IBestStoriesService
     private async Task<IReadOnlyList<StoryResponse>> GetDistributedStoriesAsync(CancellationToken cancellationToken)
     {
         var redis = _redis!;
-        var snapshot = await redis.ReadAsync();
+        StorySnapshot? snapshot;
+        try { snapshot = await redis.ReadAsync(); }
+        catch (StackExchange.Redis.RedisException exception)
+        {
+            _logger.LogWarning(exception, "Redis unavailable");
+            var fallback = _postgres is null ? null : await _postgres.ReadAsync(cancellationToken);
+            if (fallback is not null) return fallback.Stories;
+            return await GetRankedStoriesAsync(cancellationToken);
+        }
+        if (snapshot is null && _postgres is not null)
+            snapshot = await _postgres.ReadAsync(cancellationToken);
         if (snapshot is not null)
         {
             if (_timeProvider.GetUtcNow() - snapshot.FetchedAt >= TimeSpan.FromSeconds(_options.CacheSeconds))
@@ -151,6 +164,12 @@ public sealed class BestStoriesService : IBestStoriesService
             acquired = await redis.TryAcquireAsync(token, TimeSpan.FromSeconds(_options.RefreshLeaseSeconds));
             if (!acquired) return new RefreshResult(null, null);
             var existing = await redis.ReadAsync();
+            if (existing is null && _postgres is not null)
+            {
+                existing = await _postgres.ReadAsync(_stoppingToken);
+                if (existing is not null)
+                    await redis.PublishAsync(token, existing);
+            }
             if (existing is not null && _timeProvider.GetUtcNow() - existing.FetchedAt < TimeSpan.FromSeconds(_options.CacheSeconds))
                 return new RefreshResult(new Snapshot(existing.Stories, existing.FetchedAt), null);
             if (await redis.IsRetryDelayedAsync()) return new RefreshResult(null, null);
@@ -240,6 +259,7 @@ public sealed class BestStoriesService : IBestStoriesService
             var rankedStories = stories
                 .OrderByDescending(story => story.Score)
                 .ThenByDescending(story => story.Time)
+                .ThenBy(story => story.Id)
                 .Take(_options.MaxRequestedStories)
                 .ToArray();
 
