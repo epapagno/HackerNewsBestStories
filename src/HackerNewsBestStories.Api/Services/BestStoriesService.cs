@@ -13,6 +13,7 @@ public sealed class BestStoriesService : IBestStoriesService
     private readonly TimeProvider _timeProvider;
     private readonly CancellationToken _stoppingToken;
     private readonly RedisSnapshotStore? _redis;
+    private readonly SnapshotPublisher? _publisher;
     private readonly object _gate = new();
     private Snapshot? _snapshot;
     private Task<RefreshResult>? _refreshTask;
@@ -27,7 +28,8 @@ public sealed class BestStoriesService : IBestStoriesService
         ILogger<BestStoriesService> logger,
         TimeProvider timeProvider,
         IHostApplicationLifetime applicationLifetime,
-        RedisSnapshotStore? redis = null)
+        RedisSnapshotStore? redis = null,
+        SnapshotPublisher? publisher = null)
     {
         _hackerNewsClient = hackerNewsClient;
         _options = options.Value;
@@ -35,6 +37,7 @@ public sealed class BestStoriesService : IBestStoriesService
         _timeProvider = timeProvider;
         _stoppingToken = applicationLifetime.ApplicationStopping;
         _redis = redis;
+        _publisher = publisher;
     }
 
     public async Task<IReadOnlyList<StoryResponse>> GetBestStoriesAsync(
@@ -160,7 +163,10 @@ public sealed class BestStoriesService : IBestStoriesService
                     ? _options.RefreshRetrySeconds : _options.RefreshRetryWithDataSeconds));
                 return result;
             }
-            var published = await redis.PublishAsync(token, new StorySnapshot(result.Snapshot.RefreshedAt, result.Snapshot.Stories));
+            var snapshot = new StorySnapshot(result.Snapshot.RefreshedAt, result.Snapshot.Stories);
+            var published = await redis.PublishAsync(token, snapshot);
+            if (published && _publisher is not null)
+                await _publisher.PublishAsync(snapshot, _stoppingToken);
             return published ? result : new RefreshResult(null, null);
         }
         catch (Exception exception)
