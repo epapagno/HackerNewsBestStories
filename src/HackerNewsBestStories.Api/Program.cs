@@ -1,3 +1,4 @@
+using Azure.Messaging.ServiceBus;
 using HackerNewsBestStories.Api.Options;
 using HackerNewsBestStories.Api.Services;
 using Microsoft.Extensions.Options;
@@ -36,6 +37,12 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
     ConnectionMultiplexer.Connect(builder.Configuration["Redis:ConnectionString"]
         ?? "localhost:6379,abortConnect=false"));
 builder.Services.AddSingleton<RedisSnapshotStore>();
+var busConnection = builder.Configuration.GetConnectionString("ServiceBus");
+if (!string.IsNullOrWhiteSpace(busConnection))
+{
+    builder.Services.AddSingleton(_ => new ServiceBusClient(busConnection));
+    builder.Services.AddSingleton<SnapshotPublisher>();
+}
 
 builder.Services.AddSingleton<IHackerNewsClient, HackerNewsClient>();
 builder.Services.AddSingleton<IBestStoriesService, BestStoriesService>();
