@@ -21,7 +21,7 @@ public sealed class BestStoriesService : IBestStoriesService
     private DateTimeOffset _nextRefreshAttempt;
 
     private sealed record Snapshot(IReadOnlyList<StoryResponse> Stories, DateTimeOffset RefreshedAt);
-    private sealed record RefreshResult(Snapshot? Snapshot, Exception? Error);
+    private sealed record RefreshResult(Snapshot? Snapshot, Exception? Error, DataOrigin Origin = DataOrigin.External);
 
     public BestStoriesService(
         IHackerNewsClient hackerNewsClient,
@@ -43,7 +43,10 @@ public sealed class BestStoriesService : IBestStoriesService
         _postgres = postgres;
     }
 
-    public async Task<IReadOnlyList<StoryResponse>> GetBestStoriesAsync(
+    public async Task<IReadOnlyList<StoryResponse>> GetBestStoriesAsync(int count, CancellationToken cancellationToken) =>
+        (await GetBestStoriesResultAsync(count, cancellationToken)).Stories;
+
+    public async Task<BestStoriesResult> GetBestStoriesResultAsync(
         int count,
         CancellationToken cancellationToken)
     {
@@ -55,10 +58,13 @@ public sealed class BestStoriesService : IBestStoriesService
         var rankedStories = _redis is null
             ? await GetRankedStoriesAsync(cancellationToken)
             : await GetDistributedStoriesAsync(cancellationToken);
-        return rankedStories.Take(count).ToArray();
+        return rankedStories with { Stories = rankedStories.Stories.Take(count).ToArray() };
     }
 
-    private async Task<IReadOnlyList<StoryResponse>> GetRankedStoriesAsync(
+    private BestStoriesResult Result(IReadOnlyList<StoryResponse> stories, DateTimeOffset fetchedAt, DataOrigin origin) =>
+        new(stories, fetchedAt, origin, _timeProvider.GetUtcNow() - fetchedAt >= TimeSpan.FromSeconds(_options.CacheSeconds));
+
+    private async Task<BestStoriesResult> GetRankedStoriesAsync(
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -73,7 +79,7 @@ public sealed class BestStoriesService : IBestStoriesService
 
             if (_snapshot is not null && age < freshFor)
             {
-                return _snapshot.Stories;
+                return Result(_snapshot.Stories, _snapshot.RefreshedAt, DataOrigin.Cache);
             }
 
             if ((_refreshTask is null || _refreshTask.IsCompleted) && now >= _nextRefreshAttempt)
@@ -84,7 +90,7 @@ public sealed class BestStoriesService : IBestStoriesService
 
             if (_snapshot is not null && age < usableFor)
             {
-                return _snapshot.Stories;
+                return Result(_snapshot.Stories, _snapshot.RefreshedAt, DataOrigin.Cache);
             }
 
             if (_refreshTask is null || _refreshTask.IsCompleted && now < _nextRefreshAttempt)
@@ -102,26 +108,30 @@ public sealed class BestStoriesService : IBestStoriesService
             throw new HttpRequestException("Unable to refresh Hacker News stories.", result.Error);
         }
 
-        return result.Snapshot.Stories;
+        return Result(result.Snapshot.Stories, result.Snapshot.RefreshedAt, result.Origin);
     }
 
-    private async Task<IReadOnlyList<StoryResponse>> GetDistributedStoriesAsync(CancellationToken cancellationToken)
+    private async Task<BestStoriesResult> GetDistributedStoriesAsync(CancellationToken cancellationToken)
     {
         var redis = _redis!;
         StorySnapshot? snapshot;
+        var origin = DataOrigin.Cache;
         try { snapshot = await redis.ReadAsync(); }
         catch (StackExchange.Redis.RedisException exception)
         {
             _logger.LogWarning(exception, "Redis unavailable");
             var fallback = _postgres is null ? null : await _postgres.ReadAsync(cancellationToken);
-            if (fallback is not null) return fallback.Stories;
+            if (fallback is not null) return Result(fallback.Stories, fallback.FetchedAt, DataOrigin.Local);
             return await GetRankedStoriesAsync(cancellationToken);
         }
         if (snapshot is null && _postgres is not null)
+        {
             snapshot = await _postgres.ReadAsync(cancellationToken);
+            origin = DataOrigin.Local;
+        }
         if (snapshot is not null)
         {
-            if (_timeProvider.GetUtcNow() - snapshot.FetchedAt >= TimeSpan.FromSeconds(_options.CacheSeconds))
+            if (origin == DataOrigin.Local || _timeProvider.GetUtcNow() - snapshot.FetchedAt >= TimeSpan.FromSeconds(_options.CacheSeconds))
             {
                 lock (_gate)
                 {
@@ -129,7 +139,7 @@ public sealed class BestStoriesService : IBestStoriesService
                         _refreshTask = Task.Run(() => RefreshDistributedAsync(), CancellationToken.None);
                 }
             }
-            return snapshot.Stories;
+            return Result(snapshot.Stories, snapshot.FetchedAt, origin);
         }
 
         Task<RefreshResult> refresh;
@@ -140,13 +150,13 @@ public sealed class BestStoriesService : IBestStoriesService
             refresh = _refreshTask;
         }
         var result = await refresh.WaitAsync(cancellationToken);
-        if (result.Snapshot is not null) return result.Snapshot.Stories;
+        if (result.Snapshot is not null) return Result(result.Snapshot.Stories, result.Snapshot.RefreshedAt, result.Origin);
 
         // Another replica may own the cold-cache refresh.
         for (var i = 0; i < 120; i++)
         {
             var shared = await redis.ReadAsync();
-            if (shared is not null) return shared.Stories;
+            if (shared is not null) return Result(shared.Stories, shared.FetchedAt, DataOrigin.Cache);
             if (await redis.IsRetryDelayedAsync()) break;
             await Task.Delay(500, cancellationToken);
         }
@@ -164,14 +174,16 @@ public sealed class BestStoriesService : IBestStoriesService
             acquired = await redis.TryAcquireAsync(token, TimeSpan.FromSeconds(_options.RefreshLeaseSeconds));
             if (!acquired) return new RefreshResult(null, null);
             var existing = await redis.ReadAsync();
+            var origin = DataOrigin.Cache;
             if (existing is null && _postgres is not null)
             {
                 existing = await _postgres.ReadAsync(_stoppingToken);
+                origin = DataOrigin.Local;
                 if (existing is not null)
                     await redis.PublishAsync(token, existing);
             }
             if (existing is not null && _timeProvider.GetUtcNow() - existing.FetchedAt < TimeSpan.FromSeconds(_options.CacheSeconds))
-                return new RefreshResult(new Snapshot(existing.Stories, existing.FetchedAt), null);
+                return new RefreshResult(new Snapshot(existing.Stories, existing.FetchedAt), null, origin);
             if (await redis.IsRetryDelayedAsync()) return new RefreshResult(null, null);
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(_stoppingToken);
             deadline.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, _options.RefreshLeaseSeconds - 5)));
