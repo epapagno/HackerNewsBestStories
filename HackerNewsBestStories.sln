@@ -6,12 +6,18 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HackerNewsBestStories.Api",
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HackerNewsBestStories.Tests", "tests\HackerNewsBestStories.Tests\HackerNewsBestStories.Tests.csproj", "{75DDBBB8-F5B8-4AD1-A4D1-ACAD2676E13A}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HackerNewsBestStories.Worker", "src\HackerNewsBestStories.Worker\HackerNewsBestStories.Worker.csproj", "{D1C3B02A-0B23-4F59-9C27-DF83A164729E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
 		Release|Any CPU = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{D1C3B02A-0B23-4F59-9C27-DF83A164729E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D1C3B02A-0B23-4F59-9C27-DF83A164729E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D1C3B02A-0B23-4F59-9C27-DF83A164729E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D1C3B02A-0B23-4F59-9C27-DF83A164729E}.Release|Any CPU.Build.0 = Release|Any CPU
 		{F29797EC-E639-4D49-9805-FEBBF46AB167}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{F29797EC-E639-4D49-9805-FEBBF46AB167}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{F29797EC-E639-4D49-9805-FEBBF46AB167}.Release|Any CPU.ActiveCfg = Release|Any CPU
