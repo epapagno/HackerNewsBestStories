@@ -169,6 +169,43 @@ flowchart LR
     B -->|Internal dependency| S[(SQL Server)]
 ```
 
+### Data source selection
+
+```mermaid
+flowchart TD
+    A[Incoming request] --> B{Redis reachable?}
+    B -->|Yes| C{Redis contains ranking?}
+    C -->|Yes| D{Age under 6 hours?}
+    D -->|Yes| E[Return Cache - fresh]
+    D -->|No| F[Return Cache - stale]
+    F -.-> G[Schedule coordinated refresh]
+    C -->|No| H{PostgreSQL contains ranking?}
+    H -->|Yes| I[Return Local - fresh or stale]
+    I -.-> J[Restore Redis and refresh if stale]
+    H -->|No| K[Wait for distributed refresh]
+    K --> L{Refresh outcome?}
+    L -->|Own successful fetch| M[Return External]
+    L -->|Another replica publishes| N[Return Cache]
+    L -->|No snapshot available| O[HTTP 503]
+    B -->|No| P{PostgreSQL contains ranking?}
+    P -->|Yes| Q[Return Local - fresh or stale]
+    P -->|No| R[Use in-process fallback]
+    R --> S{Usable local cache or successful fetch?}
+    S -->|Cached ranking| T[Return Cache]
+    S -->|Successful upstream fetch| M
+    S -->|Neither| O
+```
+
+| Response origin | Selection condition | Background behavior |
+| --- | --- | --- |
+| Cache (Redis) | Shared snapshot exists, regardless of age | Refresh on demand if at least six hours old, subject to lease and cooldown |
+| Local (PostgreSQL) | Redis misses or is unavailable and PostgreSQL has a snapshot | Restore Redis when reachable; refresh if stale |
+| External (Hacker News) | No usable snapshot and the request's refresh successfully fetches the ranking | Attempt to update Redis and publish for persistence when using the distributed path |
+| Cache (in-process fallback) | Redis unavailable, PostgreSQL has no snapshot, and the process has a usable local snapshot | Legacy per-process refresh policy |
+| HTTP 503 | No usable snapshot and refresh fails or no shared snapshot becomes available | Retry subject to the applicable cooldown |
+
+A stale response keeps its original fetched timestamp. Background refresh does not change the origin of the response already returned. A fresh PostgreSQL snapshot can hydrate Redis without contacting Hacker News. When Redis is unreachable, the current implementation returns a PostgreSQL snapshot without scheduling a refresh.
+
 ### Request and cache refresh
 
 ```mermaid
