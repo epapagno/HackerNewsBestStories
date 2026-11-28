@@ -1,3 +1,4 @@
+using Npgsql;
 using Azure.Messaging.ServiceBus;
 using HackerNewsBestStories.Api.Options;
 using HackerNewsBestStories.Api.Services;
@@ -37,6 +38,12 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
     ConnectionMultiplexer.Connect(builder.Configuration["Redis:ConnectionString"]
         ?? "localhost:6379,abortConnect=false"));
 builder.Services.AddSingleton<RedisSnapshotStore>();
+var postgresConnection = builder.Configuration.GetConnectionString("Postgres");
+if (!string.IsNullOrWhiteSpace(postgresConnection))
+{
+    builder.Services.AddSingleton(_ => NpgsqlDataSource.Create(postgresConnection));
+    builder.Services.AddSingleton<PostgresSnapshotStore>();
+}
 var busConnection = builder.Configuration.GetConnectionString("ServiceBus");
 if (!string.IsNullOrWhiteSpace(busConnection))
 {
