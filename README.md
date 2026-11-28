@@ -151,6 +151,110 @@ production throughput or latency benchmarks.
 - Add container/deployment configuration if the target environment required it.
 
 
+## Distributed architecture
+
+The diagrams below describe the distributed implementation. The in-process cache remains a fallback when Redis is unavailable.
+
+### Component overview
+
+```mermaid
+flowchart LR
+    C[HTTP consumer] --> A[ASP.NET Core API replicas]
+    A -->|Read snapshot and coordinate refresh| R[(Redis)]
+    A -->|Fetch ranking on demand| H[Hacker News API]
+    A -->|Read persisted snapshot| P[(PostgreSQL)]
+    A -->|Publish refreshed snapshot| B[Service Bus emulator]
+    B -->|Deliver message| W[Persistence Worker]
+    W -->|Transactional write| P
+    B -->|Internal dependency| S[(SQL Server)]
+```
+
+### Request and cache refresh
+
+```mermaid
+flowchart TD
+    A[GET best stories] --> B{Redis available?}
+    B -->|No| C{PostgreSQL snapshot?}
+    C -->|Yes| D[Return persisted ranking]
+    C -->|No| E[In-process fallback]
+    B -->|Yes| F{Redis snapshot?}
+    F -->|Yes| G{Fresh under 6 hours?}
+    G -->|Yes| H[Return requested stories]
+    G -->|No| I[Return stale ranking and schedule refresh]
+    F -->|No| J{PostgreSQL snapshot?}
+    J -->|Yes| K[Return persisted ranking and schedule cache recovery]
+    J -->|No| L[Wait for shared refresh]
+    I -.-> M{Cooldown active?}
+    K -.-> M
+    L --> M
+    M -->|Yes| N[Skip upstream refresh]
+    M -->|No| O{Acquire Redis lease?}
+    O -->|No| Q[Another replica owns refresh]
+    O -->|Yes| T[Recheck shared data and restore from PostgreSQL if needed]
+    T --> U{Fresh snapshot available?}
+    U -->|Yes| V[Reuse snapshot]
+    U -->|No| X[Fetch Hacker News ranking]
+    X --> Y{Refresh successful?}
+    Y -->|Yes| Z[Replace Redis snapshot and attempt publication]
+    Y -->|No| AA[Preserve previous data and set retry cooldown]
+```
+
+The distributed refresh cooldown is three hours when data exists and 15 seconds otherwise. Cold callers may receive HTTP 503 if no snapshot becomes available. Freshness is logical: Redis does not delete the ranking after six hours.
+
+### Asynchronous persistence
+
+```mermaid
+sequenceDiagram
+    participant A as API
+    participant R as Redis
+    participant B as Service Bus
+    participant W as Worker
+    participant P as PostgreSQL
+    A->>R: Publish snapshot under owned lease
+    R-->>A: Accepted
+    A->>B: Send complete ranking
+    B-->>W: Deliver snapshot
+    W->>P: Begin transaction and acquire advisory lock
+    W->>P: Compare fetched_at
+    alt Newer snapshot
+        W->>P: Upsert stories and metadata
+        W->>P: Delete stories outside ranking
+    else Older or duplicate snapshot
+        Note over W,P: Keep existing ranking
+    end
+    W->>P: Commit transaction
+    W->>B: Complete message
+```
+
+If broker publication fails, the API logs the error and can still serve the Redis snapshot. Automatic replay of failed publications is not implemented.
+
+### Kubernetes topology
+
+```mermaid
+flowchart TD
+    C[Consumer] --> I[Ingress controller]
+    subgraph NS[Namespace epapagno-hackernews]
+        I --> AS[API ClusterIP Service]
+        AS --> A1[API Pod 1]
+        AS --> A2[API Pod 2]
+        A1 & A2 --> RS[Redis Service]
+        RS --> R[Redis Pod]
+        A1 & A2 --> BS[Service Bus Service]
+        BS --> B[Emulator Pod]
+        B --> SS[SQL Server Service]
+        SS --> S[SQL Server Pod]
+        A1 & A2 --> PS[PostgreSQL headless Service]
+        W[Worker Pod] --> BS
+        W --> PS
+        PS --> P[PostgreSQL StatefulSet Pod]
+        P --> PVC[PersistentVolumeClaim]
+        CFG[Application ConfigMap and Secret] -.-> A1 & A2 & W
+    end
+    PVC --> PV[(PersistentVolume)]
+```
+
+The ingress controller and storage provisioner are cluster infrastructure; they are not installed by these application manifests.
+
 ## Distributed deployment (local development)
 
 The API serves the ranking from Cache, Local persistence or External provider.
