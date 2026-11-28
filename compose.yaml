@@ -22,6 +22,25 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+ 
+  servicebus:
+    image: mcr.microsoft.com/azure-messaging/servicebus-emulator:latest
+    volumes:
+      - ./infra/servicebus/Config.json:/ServiceBus_Emulator/ConfigFiles/Config.json
+    environment:
+      SQL_SERVER: mssql
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-}
+      ACCEPT_EULA: ${ACCEPT_EULA:-N}
+      SQL_WAIT_INTERVAL: 30
+    depends_on:
+      - mssql
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: ${ACCEPT_EULA:-N}
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-}
+      MSSQL_PID: Developer
 
 volumes:
   postgres_data:
